@@ -1,110 +1,145 @@
 import requests
 from bs4 import BeautifulSoup
 import streamlit as st
+import pandas as pd
+import time
+import math
+from concurrent.futures import ThreadPoolExecutor
 
 # Function to detect Shopify
 def detect_shopify(soup, headers):
     if soup.find("script", src=lambda x: x and 'shopify' in x) or 'X-ShopId' in headers:
-        print("Detected Shopify")  # Debug print
-        return True
-    return False
+        return "Shopify"
+    return None
 
 # Function to detect WooCommerce
 def detect_woocommerce(soup):
     if soup.find("meta", {"name": "generator", "content": lambda x: x and 'WooCommerce' in x}):
-        print("Detected WooCommerce")  # Debug print
-        return True
-    return False
+        return "WooCommerce"
+    return None
 
 # Function to detect Magento
 def detect_magento(soup):
     if soup.find("script", src=lambda x: x and 'mage' in x) or soup.find("link", href=lambda x: x and 'Magento' in x):
-        print("Detected Magento")  # Debug print
-        return True
-    return False
+        return "Magento"
+    return None
 
 # Function to detect BigCommerce
 def detect_bigcommerce(soup):
     if soup.find("script", src=lambda x: x and 'bigcommerce' in x):
-        print("Detected BigCommerce")  # Debug print
-        return True
-    return False
+        return "BigCommerce"
+    return None
 
-# Function to detect Northbeam in the <head> section and print the <head>
+# Function to detect Northbeam in the <head> section
 def detect_northbeam_in_head(soup):
     head = soup.find('head')
     if head:
-        # Print the full content of the <head> section
-        print(f"<head> Content: {head.prettify()}")  # Debug print to show the entire <head> section
-        # Search within all script tags in the <head>
         scripts = head.find_all('script')
         for script in scripts:
-            # Check both src attribute and script content
             if script.get('src') and 'northbeam' in script.get('src'):
-                print(f"Detected Northbeam in script src: {script.get('src')}")  # Debug print if found in src
-                return True
+                return "Northbeam"
             if script.string and 'northbeam' in script.string.lower():
-                print(f"Detected Northbeam in inline script: {script.string[:100]}...")  # Debug print if found in inline script
-                return True
-    return False
+                return "Northbeam"
+    return None
 
-# Function to check if the website uses an e-commerce platform or Northbeam
-def detect_ecommerce_platforms(url):
+# Function to detect e-commerce platforms for a single URL with timeout
+def detect_platforms(url):
     try:
-        # Send a request to the website
-        response = requests.get(url)
-        print(f"Fetching URL: {url} - Status Code: {response.status_code}")  # Debug print
-        
+        response = requests.get(url, timeout=10)  # Set timeout to 10 seconds
         if response.status_code == 200:
             soup = BeautifulSoup(response.content, 'html.parser')
             headers = response.headers
             
-            # List to accumulate detected platforms
-            platforms = []
+            results = {}
             
-            # Detect various e-commerce platforms
-            if detect_shopify(soup, headers):
-                platforms.append("Shopify")
-            if detect_woocommerce(soup):
-                platforms.append("WooCommerce")
-            if detect_magento(soup):
-                platforms.append("Magento")
-            if detect_bigcommerce(soup):
-                platforms.append("BigCommerce")
-            if detect_northbeam_in_head(soup):
-                platforms.append("Northbeam")
+            shopify = detect_shopify(soup, headers)
+            woocommerce = detect_woocommerce(soup)
+            magento = detect_magento(soup)
+            bigcommerce = detect_bigcommerce(soup)
+            northbeam = detect_northbeam_in_head(soup)
             
-            # Print detected platforms for debugging
-            print(f"Detected platforms: {platforms}")  # Debug print
-            
-            # Return all detected platforms, or notify if none detected
-            if platforms:
-                return ", ".join(platforms)  # Return platforms as a comma-separated string
-            else:
-                return "Unknown platform or not detected."
+            if shopify:
+                results['E-commerce Platforms'] = shopify
+            if woocommerce:
+                results['E-commerce Platforms'] = woocommerce
+            if magento:
+                results['E-commerce Platforms'] = magento
+            if bigcommerce:
+                results['E-commerce Platforms'] = bigcommerce
+            if northbeam:
+                results['E-commerce Platforms'] = northbeam
+
+            return results if results else {"E-commerce Platforms": "Unknown platform"}
         else:
-            return "Error: Unable to retrieve website content."
+            return {"E-commerce Platforms": "Error retrieving content"}
     
+    except requests.exceptions.Timeout:
+        return {"E-commerce Platforms": "Timeout, skipped"}
     except Exception as e:
-        print(f"Error occurred: {e}")  # Debug print
-        return f"Error occurred: {e}"
+        return {"E-commerce Platforms": f"Error occurred: {e}"}
 
 # Streamlit app layout
-st.title("E-commerce & Analytics Platform Detector")
+st.title("E-commerce Platform Detector")
 
-# Input for the website URL
-url = st.text_input("Enter website URL (include https:// or http://):", "")
+# Upload CSV file
+uploaded_file = st.file_uploader("Choose a CSV file with websites", type="csv")
 
-# Button to check if the website is using an e-commerce platform or Northbeam
-if st.button("Check"):
-    if url:
-        platforms = detect_ecommerce_platforms(url)
-        print(f"Final output: {platforms}")  # Debug print
-        if "Error" in platforms:
-            st.error(platforms)
-        elif platforms == "Unknown platform or not detected.":
-            st.warning(f"❌ {url} does not seem to use a detectable platform.")
-        else:
-            st.success(f"✅ {url} is using: {platforms}")
+if uploaded_file is not None:
+    # Read CSV file
+    df = pd.read_csv(uploaded_file)
+    
+    # Check if 'website' column exists
+    if 'website' not in df.columns:
+        st.error("CSV file must contain a 'website' column.")
     else:
-        st.error("Please enter a valid URL.")
+        # Initialize the Detected Platforms column
+        df['Detected Platforms'] = None
+
+        # Split the websites into batches of 100
+        batch_size = 100
+        total_batches = math.ceil(len(df) / batch_size)
+        
+        # Iterate through batches
+        for batch_num in range(total_batches):
+            start_row = batch_num * batch_size
+            end_row = min((batch_num + 1) * batch_size, len(df))
+            batch_df = df.iloc[start_row:end_row].copy()  # Make a deep copy to avoid the warning
+            
+            st.write(f"Processing batch {batch_num + 1} of {total_batches}")
+            
+            # Progress bar for the batch
+            batch_progress_bar = st.progress(0)
+            
+            # Concurrency for batch processing
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = []
+                for index, website in enumerate(batch_df['website']):
+                    futures.append(executor.submit(detect_platforms, website))
+                
+                for i, future in enumerate(futures):
+                    result = future.result()
+                    
+                    # Update the original DataFrame df, not the slice
+                    df.loc[start_row + i, 'Detected Platforms'] = result.get('E-commerce Platforms')
+                    
+                    # Update batch progress bar
+                    batch_progress_bar.progress((i + 1) / batch_size)
+
+            # Reflect the changes in batch_df by reassigning values from df
+            batch_df['Detected Platforms'] = df.loc[start_row:end_row, 'Detected Platforms']
+
+            # Print the results for this batch
+            st.write(f"Results for batch {batch_num + 1}")
+            st.write(batch_df[['website', 'Detected Platforms']])
+            
+            # Save each batch as a separate downloadable CSV
+            csv_chunk = batch_df.to_csv(index=False)
+            st.download_button(
+                label=f"Download batch {batch_num + 1} as CSV",
+                data=csv_chunk,
+                file_name=f'platform_results_batch_{batch_num + 1}.csv',
+                mime='text/csv',
+            )
+
+        # Optionally, display all results
+        st.write(df)
